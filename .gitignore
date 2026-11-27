@@ -21,3 +21,10 @@ eval/results/*
 .env
 .DS_Store
 .claude/
+
+# September reference: only the taxonomy and guide are committed (provenance)
+reference/september/*.csv
+reference/september/*.jsonl
+
+data/interim/
+

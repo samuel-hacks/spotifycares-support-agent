@@ -15,3 +15,7 @@ select = ["E", "F", "I", "B", "UP"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+
+[tool.ruff.lint.per-file-ignores]
+# Prompt text and label guide are data; wrapping them hurts readability of the prompt.
+"data/label_silver.py" = ["E501"]
