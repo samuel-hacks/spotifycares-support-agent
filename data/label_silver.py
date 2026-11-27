@@ -7,11 +7,19 @@ Precedence per ticket, highest first:
     rule          a high-precision keyword rule
     llm           local LLM via Ollama (strict prompt, few-shot from TRAIN only)
 
+Reuse filter: for intents whose 200-row reuse check agreed below 0.75 (REUSE_CHECK_LOW),
+a reused label is kept only when the new LLM label agrees. On disagreement the ticket
+gets source `dropped_disagreement`: it keeps its reused label in silver_labels.csv for
+auditing but is never used for training (see `select_for_training`). The confidence
+cut-off is applied at training time, not here, so every label is kept with its confidence.
+
 Usage:
     python -m data.label_silver --pilot 50                # time + sanity check, LLM pool
     python -m data.label_silver --check-reused 200        # new prompt vs reused labels
     python -m data.label_silver --run [--limit N]         # label the LLM pool (cached, resumable)
-    python -m data.label_silver --assemble                # write data/processed/silver_train.parquet
+    python -m data.label_silver --label-reused            # LLM labels for low-agreement reused rows
+    python -m data.label_silver --assemble                # write data/labels/silver_labels.csv + parquet
+    python -m data.label_silver --rebuild                 # parquet from the committed CSV + train split
 
 LLM results are cached in data/interim/silver_llm_cache.jsonl keyed by
 (ticket_id, model, prompt_version), so an interrupted run resumes without relabelling.
@@ -39,7 +47,20 @@ SEED = 13
 PROCESSED = Path("data/processed")
 CACHE = Path("data/interim/silver_llm_cache.jsonl")
 OUT = PROCESSED / "silver_train.parquet"
+LABELS = Path("data/labels/silver_labels.csv")
+LABEL_COLUMNS = ["ticket_id", "silver_intent", "confidence", "source", "model", "prompt_version"]
 RULE_CONFIDENCE = 0.95
+REUSED_MODEL = "qwen3:14b"
+
+#: Intents whose reused September labels agreed with the new LLM below 0.75 on the
+#: 200-row check (seed 13). See DECISIONS.md, "Silver labels, final numbers".
+TRAINING_CUTOFF = 0.8  # default; a Day 3 experiment compares 0.6 and 0.8 on val
+CUTOFF_SOURCES = frozenset({"llm"})  # sources whose labels must pass the cut-off
+NEVER_TRAIN = frozenset({"dropped_disagreement"})
+REUSE_CHECK_LOW = frozenset({
+    "premium_activation_failure", "playback_error", "playlist_issue", "app_platform_bug",
+    "account_access", "feature_complaint", "venting_no_request",
+})
 
 # --------------------------------------------------------------------------- rules
 
@@ -404,6 +425,47 @@ def plan_sources(train, weak, human) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=["ticket_id", "silver_intent", "confidence", "source", "rule"])
 
 
+def apply_reuse_filter(labels: pd.DataFrame, llm: dict[str, dict],
+                       low: frozenset[str] = REUSE_CHECK_LOW,
+                       keep: set[str] | frozenset[str] = frozenset()) -> pd.DataFrame:
+    """Mark low-agreement reused labels the LLM disagrees with as `dropped_disagreement`.
+
+    `llm` maps ticket_id -> cache record. The reused label and confidence stay in place
+    for auditing. Reused rows in `low` with no LLM label, or in `keep` (few-shot
+    tickets), stay as they are.
+    """
+    out = labels.copy()
+    for i in out.index[(out["source"] == "reused") & out["silver_intent"].isin(low)]:
+        tid = out.at[i, "ticket_id"]
+        rec = llm.get(tid)
+        if tid in keep or rec is None or rec["intent"] == out.at[i, "silver_intent"]:
+            continue
+        out.at[i, "source"] = "dropped_disagreement"
+    return out
+
+
+def select_for_training(labels: pd.DataFrame, cutoff: float = TRAINING_CUTOFF) -> pd.DataFrame:
+    """Rows a classifier may train on: never dropped rows, LLM rows only at >= cutoff."""
+    usable = ~labels["source"].isin(NEVER_TRAIN)
+    usable &= ~labels["source"].isin(CUTOFF_SOURCES) | (labels["confidence"] >= cutoff)
+    return labels[usable]
+
+
+def build_silver_train(labels: pd.DataFrame, train: pd.DataFrame) -> pd.DataFrame:
+    """Join silver labels to the train split text: the training-ready table."""
+    labels = labels.astype({"ticket_id": str})
+    out = labels[LABEL_COLUMNS].merge(train[["ticket_id", "ticket_text"]], on="ticket_id",
+                                      how="left", validate="1:1")
+    if out["ticket_text"].isna().any():
+        raise ValueError("silver labels contain ticket_ids that are not in the train split")
+    out = out.astype({"model": "string", "prompt_version": "string"})  # stable nulls via parquet
+    return out.sort_values("ticket_id", kind="stable").reset_index(drop=True)
+
+
+def read_labels(path: Path = LABELS) -> pd.DataFrame:
+    return pd.read_csv(path, dtype={"ticket_id": str, "model": str, "prompt_version": str})
+
+
 # --------------------------------------------------------------------------- commands
 
 
@@ -427,9 +489,17 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--check-reused", type=int)
     ap.add_argument("--run", action="store_true")
     ap.add_argument("--limit", type=int)
+    ap.add_argument("--label-reused", action="store_true")
     ap.add_argument("--assemble", action="store_true")
+    ap.add_argument("--rebuild", action="store_true")
     ap.add_argument("--seed", type=int, default=SEED, help="pilot sample seed")
     args = ap.parse_args(argv)
+
+    if args.rebuild:  # needs only the committed CSV and data/processed/train.parquet
+        train = pd.read_parquet(PROCESSED / "train.parquet")
+        build_silver_train(read_labels(), train).to_parquet(OUT, index=False)
+        print(f"rebuilt {OUT} from {LABELS}")
+        return
 
     train, weak, human, golden_ids = load_inputs()
     examples = check_few_shot(train, golden_ids)
@@ -441,7 +511,7 @@ def main(argv: list[str] | None = None) -> None:
     pool = train.merge(plan[plan["source"] == "llm"][["ticket_id"]], on="ticket_id")
     pool = pool[~pool["ticket_id"].isin(few_ids)]
 
-    if args.pilot or args.check_reused or args.run:
+    if args.pilot or args.check_reused or args.run or args.label_reused:
         client = make_client()
         cache = load_cache()
         print(f"model {client.model}, prompt {PROMPT_VERSION}, cached {len(cache)}")
@@ -479,6 +549,12 @@ def main(argv: list[str] | None = None) -> None:
         todo = pool.head(args.limit) if args.limit else pool
         _summary(label_with_llm(todo, client, examples, cache), "run")
 
+    if args.label_reused:
+        low = plan[(plan["source"] == "reused") & plan["silver_intent"].isin(REUSE_CHECK_LOW)]
+        low = low[~low["ticket_id"].isin(few_ids)]
+        todo = train.merge(low[["ticket_id"]], on="ticket_id")
+        _summary(label_with_llm(todo, client, examples, cache), "reused (low-agreement intents)")
+
     if args.assemble:
         cache = load_cache()
         model = os.getenv("OLLAMA_MODEL", "llama3.1:8b")
@@ -486,7 +562,7 @@ def main(argv: list[str] | None = None) -> None:
         out = plan.copy()
         out["model"] = None
         out["prompt_version"] = None
-        out.loc[out["source"] == "reused", "model"] = "qwen3:14b"
+        out.loc[out["source"] == "reused", "model"] = REUSED_MODEL
         out.loc[out["source"] == "reused", "prompt_version"] = "september"
         is_llm = out["source"] == "llm"
         out.loc[is_llm, "silver_intent"] = out.loc[is_llm, "ticket_id"].map(
@@ -495,10 +571,18 @@ def main(argv: list[str] | None = None) -> None:
             lambda t: llm.get(t, {}).get("confidence"))
         out.loc[is_llm, "model"] = model
         out.loc[is_llm, "prompt_version"] = PROMPT_VERSION
-        out["rule"] = out["rule"].where(out["source"].isin(["rule", "rule_override"]))
+        out = apply_reuse_filter(out, llm, keep=few_ids)
         out = out.dropna(subset=["silver_intent"])
-        out.to_parquet(OUT, index=False)
-        print(f"wrote {OUT}: {len(out)} rows", out["source"].value_counts().to_dict())
+        dropped = out[out["source"] == "dropped_disagreement"]
+        print("reuse filter dropped:", dropped["silver_intent"].value_counts().to_dict())
+        print("rules fired (kept rows):", out.loc[out["source"].isin(["rule", "rule_override"]),
+                                                  "rule"].value_counts().to_dict())
+
+        labels = out[LABEL_COLUMNS].sort_values("ticket_id", kind="stable")
+        LABELS.parent.mkdir(parents=True, exist_ok=True)
+        labels.to_csv(LABELS, index=False, float_format="%.6g")
+        build_silver_train(read_labels(), train).to_parquet(OUT, index=False)
+        print(f"wrote {LABELS} and {OUT}: {len(out)} rows", out["source"].value_counts().to_dict())
 
 
 if __name__ == "__main__":

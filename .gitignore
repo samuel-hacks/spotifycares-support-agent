@@ -28,3 +28,6 @@ reference/september/*.jsonl
 
 data/interim/
 
+
+# Local assistant config (kept on disk, never committed)
+CLAUDE.md

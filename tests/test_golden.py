@@ -155,3 +155,33 @@ def test_committed_sheet_is_blind():
     for leak in ["subset", "carried_over", "september_intent", "sampling_bucket",
                  "reference_reply", "silver_intent"]:
         assert leak not in header
+
+
+# ----------------------------------------------------------------------------- committed labels
+
+LABELS_CSV = Path("data/labels/silver_labels.csv")
+
+
+@pytest.mark.skipif(not LABELS_CSV.exists() or not HAVE_SPLITS, reason="needs labels + splits")
+def test_committed_silver_labels_are_train_only_and_text_free():
+    from data.label_silver import LABEL_COLUMNS, read_labels
+
+    labels = read_labels(LABELS_CSV)
+    assert labels.columns.tolist() == LABEL_COLUMNS  # ids and labels only, no tweet text
+    assert labels["ticket_id"].is_unique
+    ids = _split_ids()
+    assert set(labels["ticket_id"]) <= ids["train"]
+    assert labels["silver_intent"].isin(INTENTS).all()
+
+
+@pytest.mark.skipif(not (LABELS_CSV.exists() and HAVE_SPLITS
+                         and Path("data/processed/silver_train.parquet").exists()),
+                    reason="needs labels, splits and silver_train.parquet")
+def test_rebuild_from_committed_labels_matches_parquet():
+    from data.label_silver import build_silver_train, read_labels
+
+    train = pd.read_parquet("data/processed/train.parquet")
+    rebuilt = build_silver_train(read_labels(LABELS_CSV), train)
+    existing = pd.read_parquet("data/processed/silver_train.parquet")
+    pd.testing.assert_frame_equal(rebuilt, existing)
+

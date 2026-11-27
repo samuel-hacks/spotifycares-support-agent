@@ -2,7 +2,7 @@
 
 Dated entries for the choices that shape the project. Newest at the bottom.
 
-**Current milestone: Day 2 nearly done. Taxonomy v2, silver labelling (full LLM run in progress), golden sample and labelling guide ready; golden labelling by Vijay next.**
+**Current milestone: Day 2: silver labels done; golden set pending (339-row sheet not yet labelled).** Day 2 counts as done only when `eval/golden.jsonl` exists with 300+ labelled items.
 
 ---
 
@@ -12,7 +12,7 @@ Fixed from the original take-home (spec 1.1). SpotifyCares has 43,265 replies in
 
 ## 2026-11-27: Repo root and Python version
 
-The spec layout calls the root `support-agent/`. I'm using the existing project folder as the root and keeping everything else in the spec layout. The spec moved to `docs/PROBLEM_STATEMENT.md`, which is where CLAUDE.md expects it.
+The spec layout calls the root `support-agent/`. I'm using the existing project folder as the root and keeping everything else in the spec layout. The spec moved to `docs/PROBLEM_STATEMENT.md`.
 
 Python 3.12 in a uv-managed `.venv`. The system Python is 3.14 and torch/transformers wheels for it are still patchy, so 3.12 is the safe choice for Day 3.
 
@@ -149,11 +149,11 @@ The 61 old golden rows in the test window go into the new golden labelling file 
 - v3: added "contact/help without a problem = insufficient_context". Hand-checked against 100 fresh tickets, about 70% correct. The new "venting" rule made it label angry complaints about concrete problems as venting.
 - v4: angry tweets that name a problem get that problem's label, plus clearer content/playlist/artist definitions. 76% and 80% on the two hand-checked samples of 50, with `other` at about 7%.
 
-The hand-check key (99 tickets) is my own judgement, not gold, and v4 was tuned on it, so those numbers are optimistic.
+The hand-check key (99 tickets) is Claude-labelled, prompt tuned on it, optimistic. It is not gold and is not the headline quality number; that is the comparison with the 80 human labels (see "Silver labels, final numbers").
 
-**Independent check: v4 vs the reused qwen3:14b labels**, seeded random 200: 73% agreement overall. The lowest intents were `premium_activation_failure` 42%, `playback_error` 55% and `playlist_issue` 60% (n=5). Reading all 54 disagreements, the old label was right in most of them: llama spreads Premium problems ("still getting adverts although I pay for premium") over app, access and playback, and calls feature requests venting. Only 2 of the 200 moved to `insufficient_context`, so the old labels are barely stale under v2. Decision: reuse all intents. Low agreement comes from the new model, not from stale old labels.
+**Independent check: v4 vs the reused qwen3:14b labels**, seeded random 200: 73% agreement overall. The lowest intents were `premium_activation_failure` 42%, `playback_error` 55% and `playlist_issue` 60% (n=5). Reading all 54 disagreements, the old label was right in most of them: llama spreads Premium problems ("still getting adverts although I pay for premium") over app, access and playback, and calls feature requests venting. Only 2 of the 200 moved to `insufficient_context`, so the old labels are barely stale under v2. Decision at the time: reuse all intents. Low agreement comes from the new model, not from stale old labels. This was later replaced by an agreement filter for the low intents (see "Reuse agreement filter").
 
-**Confidence is informative.** On the hand-check key, LLM labels with confidence of 0.8 or more were 92% correct and kept 73% of tickets. At 0.9 they were 95% correct, keeping 59%. Against qwen3:14b, agreement rises from 73% (all) to 87% at 0.9 or more.
+**Confidence is informative.** On the hand-check key (Claude-labelled, prompt tuned on it, optimistic), LLM labels with confidence of 0.8 or more were 92% correct and kept 73% of tickets. At 0.9 they were 95% correct, keeping 59%. Against qwen3:14b, agreement rises from 73% (all) to 87% at 0.9 or more.
 
 ## 2026-11-27: Golden set sampling
 
@@ -197,3 +197,102 @@ Spec section 6 escalates on "strong negative sentiment, anger, threats to cancel
 - `legal_or_regulatory_threat` (new): explicit legal action or a regulator. That means sue/lawyer/lawsuit/class action, small claims or consumer court, FTC/BBB/ombudsman/trading standards, or a threat to file a chargeback. It is never triggered by profanity, capitals, general anger, threats to cancel, or rhetorical "this is criminal / theft / a crime".
 
 The automatic detector (`agent/taxonomy.py`, `is_legal_or_regulatory_threat`) is a whole-word pattern over those terms. On train it fires on 5 of 20,626 tickets. 2 are real ("Fix this or I'm suing", "Maybe if a lawyer was involved") and 3 are jokes ("imma sue" about an ad, "consider yourself sued", a thank-you that mentions a courthouse). A chargeback only counts as a threat ("file a chargeback"), because one ticket was "I received a chargeback". Over-escalating the odd joke is accepted: the code is rare, and escalating is the safe direction. Gold labels follow what the tweet means, so the labelling guide marks the jokes and the rhetorical "is a crime" as false positives. Tone-only escalation stays out.
+
+## 2026-11-27: Silver labels, final numbers
+
+**Headline quality number: silver vs the 80 human labels.** I ran the same model and prompt on the 80 train tickets that have a human label (they keep the human label in the silver set; these LLM labels went to a separate cache). It agreed on 71% of them (57/80), on 89% of the 53 at confidence 0.8 or above, and on 91% of the 43 at 0.9 or above. The prompt was never tuned on these rows. The weak spot is app_platform_bug: 4 of 13 right, with misses spread over playlist_issue, playback_error and others. The 80 rows are September golden rows I labelled, so they share my biases; the golden set is the real test.
+
+The full LLM run labelled 17,466 train tickets with llama3.1:8b (Q4_K_M) through Ollama, prompt silver-v4, temperature 0. There were 0 parse failures and 0 request errors. Median time per call was 0.96 s (mean 1.05 s). It took about 5 hours, because macOS Photos analysis and a VM slowed it to about 3 s per call for a stretch in the middle.
+
+Pilot (50 tickets, v4 prompt): about 0.52 s per call, 0 parse failures, `other` on 3 to 4 of 50. On the 99-ticket hand-check key (Claude-labelled, prompt tuned on it, optimistic) it scored 76% to 80%. The first v1 pilot put 15 of 50 in `other`, which is why the prompt went through v2 to v4.
+
+Reuse check (200 reused September labels, seed 13, LLM vs old qwen3:14b label): 73% overall. Per intent: premium_activation_failure 0.42 (n=19), playback_error 0.55 (11), playlist_issue 0.60 (5), app_platform_bug 0.67 (15), account_access 0.69 (13), feature_complaint 0.71 (42), venting_no_request 0.71 (7), billing_charge_dispute 0.75 (20), student_discount_billing 0.81 (16), account_compromise 0.82 (11), family_plan_management 0.86 (14), content_availability 0.95 (21), cancellation_request 1.00 (6).
+
+## 2026-11-27: Reuse agreement filter (disagreement means drop)
+
+For the seven intents whose reuse agreement was below 0.75 (premium_activation_failure, playback_error, playlist_issue, app_platform_bug, account_access, feature_complaint, venting_no_request), a reused label is kept only if the new LLM label agrees. If they disagree, the ticket is **dropped from training**: its source becomes `dropped_disagreement`, and it stays in `silver_labels.csv` with the reused label so it can be audited. Reused labels for intents at 0.75 or above are kept as they are. This is Vijay's call and replaces my earlier "reuse everything" decision. The intent list is `REUSE_CHECK_LOW` and the training rule is `select_for_training` in `data/label_silver.py`. The two few-shot tickets in this group keep their reused label.
+
+A first version replaced the reused label with the LLM label instead. That was rejected because it copies the new model's biases into training, and premium_activation_failure shows the bias clearly:
+
+- In the 200-row reuse check the LLM agreed on only 8 of the 19 old premium labels, and it never said premium where the old label didn't (8 premium predictions in all). It under-predicts premium; it doesn't over-predict it.
+- Fresh LLM labels are 2.9% premium (503 of 17,466; 273 at 0.8 or above), against 6.6% of the reused labels (148 of 2,254). The reused set is not a random sample (September kept only non-`other` labels at 0.6 or above), so this gap is a hint, not a measurement. It still suggests premium is undercounted in the LLM part of silver, which is 84% of it. The golden set will tell.
+- Of the 476 replacements, only 1 became premium. That figure is partly by construction (an old premium label that disagrees can't be replaced with premium), so the two points above are the real evidence.
+
+1,320 reused tickets in these intents were LLM-labelled (0 parse failures); 476 disagreed and were dropped:
+
+| reused intent | reused | kept | dropped |
+|---|---:|---:|---:|
+| feature_complaint | 468 | 317 | 151 |
+| account_access | 200 | 134 | 66 |
+| app_platform_bug | 186 | 134 | 52 |
+| premium_activation_failure | 148 | 62 | 86 |
+| playback_error | 137 | 61 | 76 |
+| venting_no_request | 99 | 79 | 20 |
+| playlist_issue | 84 | 59 | 25 |
+
+Fresh LLM labels vs reused labels (share of each source):
+
+| intent | fresh LLM | % | reused | % |
+|---|---:|---:|---:|---:|
+| feature_complaint | 3,168 | 18.1 | 468 | 20.8 |
+| content_availability | 3,004 | 17.2 | 246 | 10.9 |
+| account_access | 1,086 | 6.2 | 200 | 8.9 |
+| billing_charge_dispute | 705 | 4.0 | 196 | 8.7 |
+| app_platform_bug | 1,540 | 8.8 | 186 | 8.3 |
+| family_plan_management | 732 | 4.2 | 163 | 7.2 |
+| student_discount_billing | 572 | 3.3 | 156 | 6.9 |
+| premium_activation_failure | 503 | 2.9 | 148 | 6.6 |
+| playback_error | 664 | 3.8 | 137 | 6.1 |
+| account_compromise | 302 | 1.7 | 113 | 5.0 |
+| venting_no_request | 1,403 | 8.0 | 99 | 4.4 |
+| playlist_issue | 1,107 | 6.3 | 84 | 3.7 |
+| cancellation_request | 153 | 0.9 | 58 | 2.6 |
+| artist_creator | 147 | 0.8 | 0 | 0.0 |
+| insufficient_context | 676 | 3.9 | 0 | 0.0 |
+| other | 1,704 | 9.8 | 0 | 0.0 |
+
+The billing, family, student, compromise and cancellation classes are also smaller in the fresh LLM labels; some of that is the rules taking those tickets first (account_compromise_hacked, billing_double_charge).
+
+`data/labels/silver_labels.csv` (committed) and `data/processed/silver_train.parquet` (gitignored, has tweet text) have 20,701 rows by source:
+
+| source | rows |
+|---|---:|
+| llm | 17,466 |
+| reused | 1,778 |
+| rule | 900 |
+| dropped_disagreement | 476 |
+| human | 80 |
+| rule_override | 1 |
+
+The 16 tickets used as few-shot examples are left out (train has 20,717). Rules fired: content_not_on_spotify 290, account_compromise_hacked 227, prefilter_short 204, billing_double_charge 86, artist_creator_own_profile 64, artist_creator_s4a 13, playlist_wrapped 10, artist_creator_distribution 7.
+
+LLM confidence is exp(sum of label-token logprobs). The cut-off is a training-time parameter (`select_for_training`, default 0.8), not baked into the labels. Training uses every human, rule, rule_override and kept reused label, never a dropped one, plus LLM labels at the cut-off or above: 14,167 tickets at 0.8 and 17,198 at 0.6.
+
+| intent | silver (not dropped) | dropped | train at 0.6 | train at 0.8 |
+|---|---:|---:|---:|---:|
+| content_availability | 3,548 | 0 | 3,268 | 2,878 |
+| feature_complaint | 3,501 | 151 | 3,075 | 2,625 |
+| app_platform_bug | 1,687 | 52 | 1,394 | 1,126 |
+| venting_no_request | 1,486 | 20 | 1,214 | 927 |
+| account_access | 1,225 | 66 | 996 | 804 |
+| playlist_issue | 1,178 | 25 | 994 | 776 |
+| family_plan_management | 899 | 0 | 848 | 771 |
+| other | 1,706 | 0 | 1,209 | 768 |
+| insufficient_context | 880 | 0 | 794 | 703 |
+| billing_charge_dispute | 993 | 0 | 762 | 608 |
+| student_discount_billing | 738 | 0 | 667 | 568 |
+| account_compromise | 649 | 0 | 598 | 565 |
+| playback_error | 726 | 76 | 548 | 396 |
+| premium_activation_failure | 567 | 86 | 443 | 337 |
+| artist_creator | 231 | 0 | 200 | 168 |
+| cancellation_request | 211 | 0 | 188 | 147 |
+
+`silver_labels.csv` holds only ticket_id, silver_intent, confidence, source, model and prompt_version, so it carries no Kaggle tweet text. `make silver RAW=path/to/twcs.csv` rebuilds the splits from twcs.csv and then `silver_train.parquet` (labels joined to train text) from the CSV; a test checks that the rebuild matches the parquet exactly. The LLM caches and run logs stay gitignored in `data/interim`.
+
+## 2026-11-27: Planned Day 3 experiment, confidence cut-off
+
+Compare training with LLM labels at 0.6 and at 0.8 or above, scored on val per-class F1 (never on the golden set). 0.8 is more precise (89% vs 71% agreement with the human labels overall); 0.6 keeps 3,031 more tickets. Watch billing_charge_dispute in particular: only 45% of its LLM labels survive 0.8 (67% survive 0.6), and it is an always-escalate intent, so recall on it matters more than for most classes. playback_error and premium_activation_failure are the other classes that shrink most at 0.8, and premium is probably undercounted already (see the reuse filter entry). Pick the cut-off per the val result and record it here.
+
+## 2026-11-27: CLAUDE.md is local only
+
+CLAUDE.md is no longer tracked; it and `.claude/` stay on disk and are gitignored. The no-attribution setting lives in the local `.claude/settings.json`.

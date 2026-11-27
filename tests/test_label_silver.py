@@ -7,14 +7,19 @@ import pytest
 from agent.taxonomy import INTENT_PRIORITY, INTENTS, resolve_primary_intent, validate
 from data.label_silver import (
     FEW_SHOT,
+    LABEL_COLUMNS,
     PREFILTER_RULE,
+    REUSE_CHECK_LOW,
     RULES,
+    apply_reuse_filter,
     apply_rules,
     build_messages,
+    build_silver_train,
     label_confidence,
     label_with_llm,
     parse_reply,
     plan_sources,
+    select_for_training,
     word_count,
 )
 
@@ -183,3 +188,64 @@ def test_plan_sources_precedence():
     assert plan.loc["r", "source"] == "reused"
     assert plan.loc["k", "source"] == "rule"
     assert plan.loc["l", "source"] == "llm"
+
+
+# ----------------------------------------------------------------------------- reuse filter
+
+
+def _rec(intent, conf):
+    return {"intent": intent, "confidence": conf, "model": "fake:1b", "prompt_version": "v"}
+
+
+def test_reuse_filter_drops_low_agreement_disagreements():
+    labels = pd.DataFrame({
+        "ticket_id": ["a", "b", "c", "d", "e", "f"],
+        "silver_intent": ["playback_error", "playback_error", "content_availability",
+                          "feature_complaint", "playback_error", "account_compromise"],
+        "confidence": [0.8] * 6,
+        "source": ["reused", "reused", "reused", "reused", "reused", "human"],
+        "model": ["qwen3:14b"] * 5 + [None],
+        "prompt_version": ["september"] * 5 + [None],
+    })
+    llm = {
+        "a": _rec("playback_error", 0.9),     # agrees -> stays reused
+        "b": _rec("app_platform_bug", 0.99),  # disagrees, low intent -> dropped
+        "c": _rec("playlist_issue", 0.99),    # disagrees but intent >= 0.75 -> stays
+        # d: no LLM label -> stays
+        "e": _rec("feature_complaint", 0.7),  # disagrees but few-shot ticket -> stays
+        "f": _rec("playlist_issue", 0.99),    # human -> never touched
+    }
+    out = apply_reuse_filter(labels, llm, keep={"e"}).set_index("ticket_id")
+    assert "playback_error" in REUSE_CHECK_LOW and "content_availability" not in REUSE_CHECK_LOW
+    assert out.loc["a", "source"] == "reused"
+    assert out.loc["b", "source"] == "dropped_disagreement"
+    # the reused label stays for auditing; the LLM label is not copied in
+    assert out.loc["b", "silver_intent"] == "playback_error"
+    assert out.loc["b", "model"] == "qwen3:14b"
+    assert (out.loc[["c", "d", "e"], "source"] == "reused").all()
+    assert out.loc["f", "source"] == "human"
+    assert out.loc["f", "silver_intent"] == "account_compromise"
+
+
+def test_select_for_training_applies_cutoff_and_drops():
+    labels = pd.DataFrame({
+        "ticket_id": list("abcdef"),
+        "silver_intent": ["other"] * 6,
+        "confidence": [0.95, 0.7, 0.5, 0.4, 1.0, 0.95],
+        "source": ["llm", "llm", "reused", "rule", "human", "dropped_disagreement"],
+    })
+    assert select_for_training(labels, 0.8)["ticket_id"].tolist() == ["a", "c", "d", "e"]
+    assert select_for_training(labels, 0.6)["ticket_id"].tolist() == ["a", "b", "c", "d", "e"]
+
+
+def test_build_silver_train_joins_text_and_rejects_unknown_ids():
+    labels = pd.DataFrame({"ticket_id": ["2", "1"], "silver_intent": ["other", "other"],
+                           "confidence": [0.5, 1.0], "source": ["llm", "human"],
+                           "model": ["m", None], "prompt_version": ["v", None]})
+    train = pd.DataFrame({"ticket_id": ["1", "2", "3"], "ticket_text": ["x", "y", "z"]})
+    out = build_silver_train(labels, train)
+    assert out.columns.tolist() == [*LABEL_COLUMNS, "ticket_text"]
+    assert out["ticket_id"].tolist() == ["1", "2"] and out["ticket_text"].tolist() == ["x", "y"]
+    with pytest.raises(ValueError):
+        build_silver_train(labels.assign(ticket_id=["9", "1"]), train)
+
