@@ -1,0 +1,17 @@
+[project]
+name = "spotifycares-support-agent"
+version = "0.1.0"
+description = "AI customer-support agent for SpotifyCares (intent, grounded reply, routing)"
+requires-python = ">=3.11"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+extend-exclude = ["archive", "data/processed", "models/saved", "eval/results"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

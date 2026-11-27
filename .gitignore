@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+
+# Raw data (Kaggle download) and large artifacts
+archive/
+archive.zip
+data/raw/
+data/processed/*
+!data/processed/.gitkeep
+models/saved/*
+!models/saved/.gitkeep
+eval/results/*
+!eval/results/.gitkeep
+
+# Secrets / local
+.env
+.DS_Store
+.claude/
